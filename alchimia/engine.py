@@ -96,11 +96,16 @@ class TwistedEngine(object):
         return self._defer_to_engine(
             self._engine.table_names, schema, connection)
 
+    def _connect_error(self, failure, worker):
+        worker.quit()
+        return failure
+
     def connect(self):
         worker = self._create_worker()
         return (_defer_to_worker(self._reactor.callFromThread, worker,
                                  self._engine.connect)
-                .addCallback(TwistedConnection, self, worker))
+                .addCallback(TwistedConnection, self, worker)
+                .addErrback(self._connect_error, worker))
 
 
 class TwistedConnection(object):

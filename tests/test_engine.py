@@ -19,12 +19,21 @@ from alchimia.engine import (
 from .doubles import FakeThreadedReactor, ImmediateWorker
 
 
+class TrackingWorkerFactory(object):
+    """Factory to track created ImmediateWorkers"""
+    def __init__(self):
+        self.created = []
+    def __call__(self):
+        self.created.append(ImmediateWorker())
+        return self.created[-1]
+
+
 def create_engine(**kwargs):
     if 'TEST_DB_URL' in os.environ:
         TEST_DB_URL = os.environ['TEST_DB_URL']
     else:
         TEST_DB_URL = 'sqlite://'
-
+    create_worker = kwargs.pop('create_worker', ImmediateWorker)
     if TEST_DB_URL.startswith("sqlite:"):
         # per
         # http://docs.sqlalchemy.org/en/latest/dialects/sqlite.html#serializable-isolation-savepoints-transactional-ddl,
@@ -42,11 +51,11 @@ def create_engine(**kwargs):
         def do_begin(conn):
             # emit our own BEGIN
             conn.execute("BEGIN")
-        return wrap_engine(FakeThreadedReactor(), sub_engine, ImmediateWorker)
+        return wrap_engine(FakeThreadedReactor(), sub_engine, create_worker)
 
     engine = sqlalchemy.create_engine(
         TEST_DB_URL, strategy=TWISTED_STRATEGY,
-        reactor=FakeThreadedReactor(), create_worker=ImmediateWorker,
+        reactor=FakeThreadedReactor(), create_worker=create_worker,
         **kwargs)
     if TEST_DB_URL.startswith("postgresql"):
         tmpdb_name = "testdb"+hexlify(os.urandom(16)).decode()
@@ -58,7 +67,7 @@ def create_engine(**kwargs):
         conn.close()
         engine = sqlalchemy.create_engine(
             tmpdb_url, strategy=TWISTED_STRATEGY,
-            reactor=FakeThreadedReactor(), create_worker=ImmediateWorker,
+            reactor=FakeThreadedReactor(), create_worker=create_worker,
             **kwargs)
     return engine
 
@@ -121,6 +130,19 @@ class TestEngine(unittest.TestCase):
         self.successResultOf(d)
         d = engine.has_table('mytable')
         assert self.successResultOf(d) is True
+
+    def test_connect_failure_cleanup(self):
+        worker_factory = TrackingWorkerFactory()
+        engine = create_engine(create_worker=worker_factory)
+        # Forget about the worker created by the engine
+        del worker_factory.created[:]
+
+        def conenct_fail():
+            raise RuntimeError('connect failure')
+
+        engine._engine.connect = conenct_fail
+        failure = self.failureResultOf(engine.connect(), RuntimeError)
+        self.assertTrue(all(worker._quitted for worker in worker_factory.created))
 
 
 class TestConnection(unittest.TestCase):
